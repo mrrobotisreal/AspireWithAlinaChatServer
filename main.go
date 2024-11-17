@@ -17,6 +17,7 @@ import (
 var mongoClient *mongo.Client
 var dbName = "aspireDB"
 var chatsCollection = "chats"
+var studentsCollection = "students"
 
 func main() {
 	// Initialize MongoDB connection
@@ -44,6 +45,7 @@ func main() {
 		log.Fatal(http.ListenAndServe(":11112", nil))
 	}()
 
+	http.HandleFunc("/chats", handleFetchRecentChats)
 	http.HandleFunc("/messages", handleFetchMessages)
 	log.Println("Starting http server on port 11113...")
 	log.Fatal(http.ListenAndServe(":11113", nil))
@@ -59,7 +61,9 @@ type Client struct {
 // Message represents a chat message
 type Message struct {
 	From    string `json:"from"`
+	FromID  string `json:"fromID"`
 	To      string `json:"to"`
+	ToID    string `json:"toID"`
 	Content string `json:"content"`
 	Time    int64  `json:"time"`
 }
@@ -68,7 +72,9 @@ type Message struct {
 type ChatMessage struct {
 	ChatID  string `json:"chatID"`
 	From    string `json:"from"`
+	FromID  string `json:"fromID"`
 	To      string `json:"to"`
+	ToID    string `json:"toID"`
 	Content string `json:"content"`
 	Time    int64  `json:"time"`
 }
@@ -95,9 +101,16 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	client := &Client{ID: studentID, Conn: conn, Send: make(chan []byte)}
 
 	log.Print("Client connected: ")
-	log.Println(conn.RemoteAddr())
+	//log.Println(conn.RemoteAddr())
 
 	clients[studentID] = client
+
+	chatRoomID := "global"
+	if _, ok := chatRooms[chatRoomID]; !ok {
+		chatRooms[chatRoomID] = []*Client{}
+	}
+	chatRooms[chatRoomID] = append(chatRooms[chatRoomID], client)
+
 	go handleMessages(client)
 	go client.writeMessages()
 }
@@ -114,27 +127,72 @@ func handleMessages(client *Client) {
 			break
 		}
 		log.Print("Reading message: ")
-		fmt.Printf("From: %s", msg.From)
+		fmt.Printf("From: %s (", msg.From)
+		fmt.Printf("%s)", msg.FromID)
 		fmt.Println()
-		fmt.Printf("To: %s", msg.To)
+		fmt.Printf("To: %s (", msg.To)
+		fmt.Printf("%s)", msg.ToID)
 		fmt.Println()
 		fmt.Printf("Content: %s", msg.Content)
 		fmt.Println()
 		fmt.Printf("Time: %d", msg.Time)
 		fmt.Println()
 
-		chatRoomID := getChatRoomID(msg.From, msg.To)
+		chatRoomID := getChatRoomID(msg.FromID, msg.ToID)
 		fmt.Printf("Chat Room ID: %s", chatRoomID)
+		fmt.Println()
 
 		if _, ok := chatRooms[chatRoomID]; !ok {
-			chatRooms[chatRoomID] = []*Client{}
+			fmt.Println("!ok, adding chat room")
+			chatRooms[chatRoomID] = []*Client{
+				client,
+			}
+
+			// TODO: remove the conditionals below; for testing only
+			if client.ID != msg.FromID {
+				recipientClient := &Client{
+					ID:   msg.FromID,
+					Conn: client.Conn,
+					Send: make(chan []byte),
+				}
+				chatRooms[chatRoomID] = append(chatRooms[chatRoomID], recipientClient)
+			} else if client.ID != msg.ToID {
+				recipientClient := &Client{
+					ID:   msg.ToID,
+					Conn: client.Conn,
+					Send: make(chan []byte),
+				}
+				chatRooms[chatRoomID] = append(chatRooms[chatRoomID], recipientClient)
+			}
+		}
+
+		chatMessage := ChatMessage{
+			ChatID:  chatRoomID,
+			From:    msg.From,
+			FromID:  msg.FromID,
+			To:      msg.To,
+			ToID:    msg.ToID,
+			Content: msg.Content,
+			Time:    msg.Time,
 		}
 
 		for _, chatClient := range chatRooms[chatRoomID] {
+			fmt.Println("chatClientID: " + chatClient.ID)
 			if chatClient.ID == msg.To {
-				chatClient.Send <- []byte(fmt.Sprintf("%s: %s,\n%d", msg.From, msg.Content, msg.Time))
+				messageJSON, err := json.Marshal(chatMessage)
+				if err != nil {
+					log.Printf("Error serializing message: %v", err)
+					continue // Skip sending this message
+				}
+
+				chatClient.Send <- messageJSON
 			}
 		}
+
+		// Save to chatHistory database no matter what,
+		// in case any WS issues, then at least http can
+		// fetch the messages, and they're still accessible.
+		saveMessageToDB(chatMessage)
 	}
 }
 
@@ -166,7 +224,9 @@ func saveMessageToDB(msg ChatMessage) {
 	_, err := collection.InsertOne(ctx, bson.M{
 		"chatID":  msg.ChatID,
 		"from":    msg.From,
+		"fromID":  msg.FromID,
 		"to":      msg.To,
+		"toID":    msg.ToID,
 		"content": msg.Content,
 		"time":    msg.Time,
 	})
@@ -174,7 +234,7 @@ func saveMessageToDB(msg ChatMessage) {
 	if err != nil {
 		log.Println("Error writing to MongoDB:", err)
 	} else {
-		log.Println("Message saved to MongoDB:", msg)
+		log.Println("Message saved to MongoDB:", msg.ChatID)
 	}
 }
 
@@ -187,14 +247,6 @@ func handleFetchMessages(w http.ResponseWriter, r *http.Request) {
 	chatID := r.URL.Query().Get("chatID")
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
-
-	fmt.Println("Fetching messages...")
-	fmt.Printf("ChatID: %s", chatID)
-	fmt.Println()
-	fmt.Printf("Page: %s", pageStr)
-	fmt.Println()
-	fmt.Printf("Limit: %s", limitStr)
-	fmt.Println()
 
 	if chatID == "" {
 		http.Error(w, "chatID is required", http.StatusBadRequest)
@@ -246,6 +298,106 @@ func fetchMessages(chatID string, page, limit int) ([]bson.M, error) {
 	}
 
 	return messages, nil
+}
+
+func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
+	studentID := r.URL.Query().Get("studentID")
+	if studentID == "" {
+		http.Error(w, "studentID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Fetch recent chats
+	chats, err := fetchRecentChats(studentID)
+	if err != nil {
+		http.Error(w, "Failed to fetch recent chats: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(chats)
+}
+
+func fetchRecentChats(studentID string) ([]bson.M, error) {
+	studentInfo, _ := getStudentInfo(studentID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoClient.Database(dbName).Collection(chatsCollection)
+
+	//matchStage := bson.D{{"$match", bson.D{{}}}}
+	pipeline := mongo.Pipeline{
+		// Match messages involving the user
+		{{"$match", bson.M{
+			"$or": []bson.M{
+				{"fromID": studentInfo.StudentId},
+				{"toID": studentInfo.StudentId},
+			},
+		}}},
+		// Sort messages by time descending
+		{{"$sort", bson.D{{"time", -1}}}},
+		// Group by chatID
+		{{"$group", bson.M{
+			"_id":               "$chatID",
+			"mostRecentMessage": bson.M{"$first": "$$ROOT"}, // First message (most recent)
+		}}},
+		// Add 'chatID' and 'to' to the final output
+		{{"$project", bson.M{
+			"chatID":            "$_id",
+			"to":                "$mostRecentMessage.to",
+			"toID":              "$mostRecentMessage.toID",
+			"mostRecentMessage": "$mostRecentMessage",
+			"_id":               0, // Exclude MongoDB internal _id
+		}}},
+	}
+
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []bson.M
+	if err = cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
+type Student struct {
+	StudentId          string `json:"student_id"`
+	FirstName          string `json:"first_name"`
+	PreferredName      string `json:"preferred_name"`
+	LastName           string `json:"last_name"`
+	EmailAddress       string `json:"email_address"`
+	Password           string `json:"password"`
+	Salt               string `json:"salt"`
+	NativeLanguage     string `json:"native_language"`
+	PreferredLanguage  string `json:"preferred_language"`
+	StudentSince       string `json:"student_since"`
+	ProfilePicturePath string `json:"profile_picture_path"`
+	ThemeMode          string `json:"theme_mode"`
+	FontStyle          string `json:"font_style"`
+	TimeZone           string `json:"time_zone"`
+}
+
+func getStudentInfo(studentID string) (Student, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoClient.Database(dbName).Collection(studentsCollection)
+
+	var studentInfo Student
+	err := collection.FindOne(ctx, bson.M{"studentid": studentID}).Decode(&studentInfo)
+	if err != nil {
+		log.Println("Error getting studentInfo: " + err.Error())
+		return Student{}, err
+	}
+
+	return studentInfo, nil
 }
 
 func createIndex() {
