@@ -38,17 +38,26 @@ func main() {
 
 	createIndex()
 
+	certFile := "/etc/letsencrypt/live/aspirewithalina.com/fullchain.pem"
+	keyFile := "/etc/letsencrypt/live/aspirewithalina.com/privkey.pem"
+
 	go func() {
 		http.HandleFunc("/chat", handleConnections)
 
 		fmt.Println("Starting websocket server on port 11112...")
-		log.Fatal(http.ListenAndServe(":11112", nil))
+		if err := http.ListenAndServeTLS(":11112", certFile, keyFile, nil); err != nil {
+			log.Fatalf("Failed to start websocket server on port 11112: %v", err)
+		}
+		//log.Fatal(http.ListenAndServe(":11112", nil))
 	}()
 
 	http.HandleFunc("/chats", handleFetchRecentChats)
 	http.HandleFunc("/messages", handleFetchMessages)
 	log.Println("Starting http server on port 11113...")
-	log.Fatal(http.ListenAndServe(":11113", nil))
+	//log.Fatal(http.ListenAndServe(":11113", nil))
+	if err := http.ListenAndServeTLS(":11113", certFile, keyFile, nil); err != nil {
+		log.Fatalf("Failed to start http server on port 11113: %v", err)
+	}
 }
 
 // Client represents a single chat user
