@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -53,6 +54,7 @@ func main() {
 
 	http.HandleFunc("/chats", handleFetchRecentChats)
 	http.HandleFunc("/messages", handleFetchMessages)
+	http.HandleFunc("/message", handleMessage)
 	log.Println("Starting http server on port 11113...")
 	//log.Fatal(http.ListenAndServe(":11113", nil))
 	if err := http.ListenAndServeTLS(":11113", certFile, keyFile, nil); err != nil {
@@ -231,13 +233,14 @@ func saveMessageToDB(msg ChatMessage) {
 	collection := mongoClient.Database(dbName).Collection(chatsCollection)
 
 	_, err := collection.InsertOne(ctx, bson.M{
-		"chatID":  msg.ChatID,
-		"from":    msg.From,
-		"fromID":  msg.FromID,
-		"to":      msg.To,
-		"toID":    msg.ToID,
-		"content": msg.Content,
-		"time":    msg.Time,
+		"chatID":    msg.ChatID,
+		"messageID": uuid.New(),
+		"from":      msg.From,
+		"fromID":    msg.FromID,
+		"to":        msg.To,
+		"toID":      msg.ToID,
+		"content":   msg.Content,
+		"time":      msg.Time,
 	})
 
 	if err != nil {
@@ -308,6 +311,37 @@ func fetchMessages(chatID string, page, limit int) ([]bson.M, error) {
 
 	return messages, nil
 }
+
+func handleMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req Message
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			fmt.Println("Invalid request body during POST request...")
+			return
+		}
+		postMessage(req)
+	}
+}
+
+func postMessage(msg Message) error {
+	chatRoomID := getChatRoomID(msg.ToID, msg.FromID)
+	newChatMsg := ChatMessage{
+		ChatID: chatRoomID,
+		From:   msg.From,
+		FromID: msg.FromID,
+		Time:   msg.Time,
+		To:     msg.To,
+		ToID:   msg.ToID,
+	}
+	saveMessageToDB(newChatMsg)
+	return nil
+}
+
+func putMessage() {}
+
+func deleteMessage() {}
 
 func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
 	studentID := r.URL.Query().Get("studentID")
