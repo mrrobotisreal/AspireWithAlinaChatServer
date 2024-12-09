@@ -19,6 +19,7 @@ var mongoClient *mongo.Client
 var dbName = "aspireDB"
 var chatsCollection = "chats"
 var studentsCollection = "students"
+var teachersCollection = "teachers"
 
 func main() {
 	// Initialize MongoDB connection
@@ -71,23 +72,25 @@ type Client struct {
 
 // Message represents a chat message
 type Message struct {
-	From    string `json:"from"`
-	FromID  string `json:"fromID"`
-	To      string `json:"to"`
-	ToID    string `json:"toID"`
-	Content string `json:"content"`
-	Time    int64  `json:"time"`
+	From        string `json:"from"`
+	FromID      string `json:"fromID"`
+	To          string `json:"to"`
+	ToID        string `json:"toID"`
+	Content     string `json:"content"`
+	Time        int64  `json:"time"`
+	IsToTeacher bool   `json:"is_to_teacher"`
 }
 
 // ChatMessage represents the document form of a chat message for MongoDB
 type ChatMessage struct {
-	ChatID  string `json:"chatID"`
-	From    string `json:"from"`
-	FromID  string `json:"fromID"`
-	To      string `json:"to"`
-	ToID    string `json:"toID"`
-	Content string `json:"content"`
-	Time    int64  `json:"time"`
+	ChatID      string `json:"chatID"`
+	From        string `json:"from"`
+	FromID      string `json:"fromID"`
+	To          string `json:"to"`
+	ToID        string `json:"toID"`
+	Content     string `json:"content"`
+	Time        int64  `json:"time"`
+	IsToTeacher bool   `json:"is_to_teacher"`
 }
 
 var clients = make(map[string]*Client)     // Track connected clients
@@ -178,13 +181,14 @@ func handleMessages(client *Client) {
 		}
 
 		chatMessage := ChatMessage{
-			ChatID:  chatRoomID,
-			From:    msg.From,
-			FromID:  msg.FromID,
-			To:      msg.To,
-			ToID:    msg.ToID,
-			Content: msg.Content,
-			Time:    msg.Time,
+			ChatID:      chatRoomID,
+			From:        msg.From,
+			FromID:      msg.FromID,
+			To:          msg.To,
+			ToID:        msg.ToID,
+			Content:     msg.Content,
+			Time:        msg.Time,
+			IsToTeacher: msg.IsToTeacher,
 		}
 
 		for _, chatClient := range chatRooms[chatRoomID] {
@@ -233,14 +237,15 @@ func saveMessageToDB(msg ChatMessage) {
 	collection := mongoClient.Database(dbName).Collection(chatsCollection)
 
 	_, err := collection.InsertOne(ctx, bson.M{
-		"chatID":    msg.ChatID,
-		"messageID": uuid.New(),
-		"from":      msg.From,
-		"fromID":    msg.FromID,
-		"to":        msg.To,
-		"toID":      msg.ToID,
-		"content":   msg.Content,
-		"time":      msg.Time,
+		"chatID":      msg.ChatID,
+		"messageID":   uuid.New(),
+		"from":        msg.From,
+		"fromID":      msg.FromID,
+		"to":          msg.To,
+		"toID":        msg.ToID,
+		"content":     msg.Content,
+		"time":        msg.Time,
+		"istoteacher": msg.IsToTeacher,
 	})
 
 	if err != nil {
@@ -328,12 +333,13 @@ func handleMessage(w http.ResponseWriter, r *http.Request) {
 func postMessage(msg Message) error {
 	chatRoomID := getChatRoomID(msg.ToID, msg.FromID)
 	newChatMsg := ChatMessage{
-		ChatID: chatRoomID,
-		From:   msg.From,
-		FromID: msg.FromID,
-		Time:   msg.Time,
-		To:     msg.To,
-		ToID:   msg.ToID,
+		ChatID:      chatRoomID,
+		From:        msg.From,
+		FromID:      msg.FromID,
+		Time:        msg.Time,
+		To:          msg.To,
+		ToID:        msg.ToID,
+		IsToTeacher: msg.IsToTeacher,
 	}
 	saveMessageToDB(newChatMsg)
 	return nil
@@ -344,14 +350,25 @@ func putMessage() {}
 func deleteMessage() {}
 
 func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
+	var ID string
+	var isToTeacher bool
 	studentID := r.URL.Query().Get("studentID")
-	if studentID == "" {
-		http.Error(w, "studentID is required", http.StatusBadRequest)
+	teacherID := r.URL.Query().Get("teacherID")
+	if studentID == "" && teacherID == "" {
+		http.Error(w, "studentID or teacherID is required", http.StatusBadRequest)
 		return
+	}
+	if studentID == "" && teacherID != "" {
+		ID = teacherID
+		isToTeacher = true
+	}
+	if teacherID == "" && studentID != "" {
+		ID = studentID
+		isToTeacher = false
 	}
 
 	// Fetch recent chats
-	chats, err := fetchRecentChats(studentID)
+	chats, err := fetchRecentChats(ID, isToTeacher)
 	if err != nil {
 		http.Error(w, "Failed to fetch recent chats: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -362,8 +379,21 @@ func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(chats)
 }
 
-func fetchRecentChats(studentID string) ([]bson.M, error) {
-	studentInfo, _ := getStudentInfo(studentID)
+func fetchRecentChats(ID string, isToTeacher bool) ([]bson.M, error) {
+	var userID string
+	var studentInfo Student
+	var teacherInfo Teacher
+	if isToTeacher {
+		// TODO: maybe remove these? I don't remember why I even needed it in the first place. I can just use ID
+		teacherInfo, _ = getTeacherInfo(ID)
+		userID = teacherInfo.TeacherID
+		studentInfo = Student{}
+	} else {
+		// TODO: maybe remove these? I don't remember why I even needed it in the first place. I can just use ID
+		studentInfo, _ = getStudentInfo(ID)
+		userID = studentInfo.StudentId
+		teacherInfo = Teacher{}
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -375,8 +405,8 @@ func fetchRecentChats(studentID string) ([]bson.M, error) {
 		// Match messages involving the user
 		{{"$match", bson.M{
 			"$or": []bson.M{
-				{"fromID": studentInfo.StudentId},
-				{"toID": studentInfo.StudentId},
+				{"fromID": userID},
+				{"toID": userID},
 			},
 		}}},
 		// Sort messages by time descending
@@ -389,8 +419,8 @@ func fetchRecentChats(studentID string) ([]bson.M, error) {
 		// Add 'chatID' and 'to' to the final output
 		{{"$project", bson.M{
 			"chatID":            "$_id",
-			"to":                "$mostRecentMessage.to",
-			"toID":              "$mostRecentMessage.toID",
+			"to":                "$mostRecentMessage.to",   // TODO: Remove, not needed. Update Electron app first though
+			"toID":              "$mostRecentMessage.toID", // TODO: Remove, not needed. Update Electron app first though
 			"mostRecentMessage": "$mostRecentMessage",
 			"_id":               0, // Exclude MongoDB internal _id
 		}}},
@@ -410,6 +440,23 @@ func fetchRecentChats(studentID string) ([]bson.M, error) {
 	return results, nil
 }
 
+type Teacher struct {
+	TeacherID          string `json:"teacherID"`
+	FirstName          string `json:"first_name"`
+	PreferredName      string `json:"preferred_name"`
+	LastName           string `json:"last_name"`
+	NativeLanguage     string `json:"native_language"`
+	PreferredLanguage  string `json:"preferred_language"`
+	EmailAddress       string `json:"email_address"`
+	Password           string `json:"password"`
+	Salt               string `json:"salt"`
+	ProfilePictureURL  string `json:"profile_picture_url"`
+	ProfilePicturePath string `json:"profile_picture_path"`
+	ThemeMode          string `json:"theme_mode"`
+	FontStyle          string `json:"font_style"`
+	TimeZone           string `json:"time_zone"`
+}
+
 type Student struct {
 	StudentId          string `json:"student_id"`
 	FirstName          string `json:"first_name"`
@@ -425,6 +472,24 @@ type Student struct {
 	ThemeMode          string `json:"theme_mode"`
 	FontStyle          string `json:"font_style"`
 	TimeZone           string `json:"time_zone"`
+	LessonsRemaining   int32  `json:"lessons_remaining"`
+	LessonsCompleted   int32  `json:"lessons_completed"`
+}
+
+func getTeacherInfo(teacherID string) (Teacher, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoClient.Database(dbName).Collection(teachersCollection)
+
+	var teacherInfo Teacher
+	err := collection.FindOne(ctx, bson.M{"teacherID": teacherID}).Decode(&teacherInfo)
+	if err != nil {
+		log.Println("Error getting teacherInfo: " + err.Error())
+		return Teacher{}, err
+	}
+
+	return teacherInfo, nil
 }
 
 func getStudentInfo(studentID string) (Student, error) {
