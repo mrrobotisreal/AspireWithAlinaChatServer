@@ -55,6 +55,7 @@ func main() {
 
 	http.HandleFunc("/chats", handleFetchRecentChats)
 	http.HandleFunc("/messages", handleFetchMessages)
+	http.HandleFunc("/messages/delete", handleDeleteMessages)
 	http.HandleFunc("/message", handleMessage)
 	log.Println("Starting http server on port 11113...")
 	//log.Fatal(http.ListenAndServe(":11113", nil))
@@ -72,25 +73,27 @@ type Client struct {
 
 // Message represents a chat message
 type Message struct {
-	From        string `json:"from"`
-	FromID      string `json:"fromID"`
-	To          string `json:"to"`
-	ToID        string `json:"toID"`
-	Content     string `json:"content"`
-	Time        int64  `json:"time"`
-	IsToTeacher bool   `json:"is_to_teacher"`
+	From          string `json:"from"`
+	FromID        string `json:"fromID"`
+	To            string `json:"to"`
+	ToID          string `json:"toID"`
+	Content       string `json:"content"`
+	Time          int64  `json:"time"`
+	IsToTeacher   bool   `json:"is_to_teacher"`
+	IsFromTeacher bool   `json:"is_from_teacher"`
 }
 
 // ChatMessage represents the document form of a chat message for MongoDB
 type ChatMessage struct {
-	ChatID      string `json:"chatID"`
-	From        string `json:"from"`
-	FromID      string `json:"fromID"`
-	To          string `json:"to"`
-	ToID        string `json:"toID"`
-	Content     string `json:"content"`
-	Time        int64  `json:"time"`
-	IsToTeacher bool   `json:"is_to_teacher"`
+	ChatID        string `json:"chatID"`
+	From          string `json:"from"`
+	FromID        string `json:"fromID"`
+	To            string `json:"to"`
+	ToID          string `json:"toID"`
+	Content       string `json:"content"`
+	Time          int64  `json:"time"`
+	IsToTeacher   bool   `json:"is_to_teacher"`
+	IsFromTeacher bool   `json:"is_from_teacher"`
 }
 
 var clients = make(map[string]*Client)     // Track connected clients
@@ -151,6 +154,8 @@ func handleMessages(client *Client) {
 		fmt.Println()
 		fmt.Printf("Time: %d", msg.Time)
 		fmt.Println()
+		fmt.Println("IsToTeacher:", msg.IsToTeacher)
+		fmt.Println("IsFromTeacher:", msg.IsFromTeacher)
 
 		chatRoomID := getChatRoomID(msg.FromID, msg.ToID)
 		fmt.Printf("Chat Room ID: %s", chatRoomID)
@@ -181,14 +186,15 @@ func handleMessages(client *Client) {
 		}
 
 		chatMessage := ChatMessage{
-			ChatID:      chatRoomID,
-			From:        msg.From,
-			FromID:      msg.FromID,
-			To:          msg.To,
-			ToID:        msg.ToID,
-			Content:     msg.Content,
-			Time:        msg.Time,
-			IsToTeacher: msg.IsToTeacher,
+			ChatID:        chatRoomID,
+			From:          msg.From,
+			FromID:        msg.FromID,
+			To:            msg.To,
+			ToID:          msg.ToID,
+			Content:       msg.Content,
+			Time:          msg.Time,
+			IsToTeacher:   msg.IsToTeacher,
+			IsFromTeacher: msg.IsFromTeacher,
 		}
 
 		for _, chatClient := range chatRooms[chatRoomID] {
@@ -237,15 +243,16 @@ func saveMessageToDB(msg ChatMessage) {
 	collection := mongoClient.Database(dbName).Collection(chatsCollection)
 
 	_, err := collection.InsertOne(ctx, bson.M{
-		"chatID":      msg.ChatID,
-		"messageID":   uuid.New(),
-		"from":        msg.From,
-		"fromID":      msg.FromID,
-		"to":          msg.To,
-		"toID":        msg.ToID,
-		"content":     msg.Content,
-		"time":        msg.Time,
-		"istoteacher": msg.IsToTeacher,
+		"chatID":        msg.ChatID,
+		"messageID":     uuid.New(),
+		"from":          msg.From,
+		"fromID":        msg.FromID,
+		"to":            msg.To,
+		"toID":          msg.ToID,
+		"content":       msg.Content,
+		"time":          msg.Time,
+		"istoteacher":   msg.IsToTeacher,
+		"isfromteacher": msg.IsFromTeacher,
 	})
 
 	if err != nil {
@@ -333,13 +340,14 @@ func handleMessage(w http.ResponseWriter, r *http.Request) {
 func postMessage(msg Message) error {
 	chatRoomID := getChatRoomID(msg.ToID, msg.FromID)
 	newChatMsg := ChatMessage{
-		ChatID:      chatRoomID,
-		From:        msg.From,
-		FromID:      msg.FromID,
-		Time:        msg.Time,
-		To:          msg.To,
-		ToID:        msg.ToID,
-		IsToTeacher: msg.IsToTeacher,
+		ChatID:        chatRoomID,
+		From:          msg.From,
+		FromID:        msg.FromID,
+		Time:          msg.Time,
+		To:            msg.To,
+		ToID:          msg.ToID,
+		IsToTeacher:   msg.IsToTeacher,
+		IsFromTeacher: msg.IsFromTeacher,
 	}
 	saveMessageToDB(newChatMsg)
 	return nil
@@ -349,9 +357,59 @@ func putMessage() {}
 
 func deleteMessage() {}
 
+type DeleteAllChatMessagesRequest struct {
+	ChatID string `json:"chat_id"`
+}
+
+type DeleteAllChatMessagesResponse struct {
+	IsDeleted bool `json:"is_deleted"`
+}
+
+func handleDeleteMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DeleteAllChatMessagesRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	response, err := deleteMessages(req.ChatID)
+	if err != nil {
+		http.Error(w, "Error deleting all messages for chatID: "+req.ChatID, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func deleteMessages(chatID string) (DeleteAllChatMessagesResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoClient.Database(dbName).Collection(chatsCollection)
+	_, err := collection.DeleteMany(ctx, bson.M{"chatid": chatID})
+	if err != nil {
+		fmt.Println("Error finding and deleting all chat messages for chatID:", chatID)
+		fmt.Println("Error message:", err)
+		return DeleteAllChatMessagesResponse{
+			IsDeleted: false,
+		}, err
+	}
+
+	return DeleteAllChatMessagesResponse{
+		IsDeleted: true,
+	}, nil
+}
+
 func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
 	var ID string
-	var isToTeacher bool
+	var isTeacher bool
 	studentID := r.URL.Query().Get("studentID")
 	teacherID := r.URL.Query().Get("teacherID")
 	if studentID == "" && teacherID == "" {
@@ -360,15 +418,15 @@ func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
 	}
 	if studentID == "" && teacherID != "" {
 		ID = teacherID
-		isToTeacher = true
+		isTeacher = true
 	}
 	if teacherID == "" && studentID != "" {
 		ID = studentID
-		isToTeacher = false
+		isTeacher = false
 	}
 
 	// Fetch recent chats
-	chats, err := fetchRecentChats(ID, isToTeacher)
+	chats, err := fetchRecentChats(ID, isTeacher)
 	if err != nil {
 		http.Error(w, "Failed to fetch recent chats: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -379,11 +437,11 @@ func handleFetchRecentChats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(chats)
 }
 
-func fetchRecentChats(ID string, isToTeacher bool) ([]bson.M, error) {
+func fetchRecentChats(ID string, isTeacher bool) ([]bson.M, error) {
 	var userID string
 	var studentInfo Student
 	var teacherInfo Teacher
-	if isToTeacher {
+	if isTeacher {
 		// TODO: maybe remove these? I don't remember why I even needed it in the first place. I can just use ID
 		teacherInfo, _ = getTeacherInfo(ID)
 		userID = teacherInfo.TeacherID
@@ -455,6 +513,7 @@ type Teacher struct {
 	ThemeMode          string `json:"theme_mode"`
 	FontStyle          string `json:"font_style"`
 	TimeZone           string `json:"time_zone"`
+	LessonsTaught      int64  `json:"lessons_taught"`
 }
 
 type Student struct {
