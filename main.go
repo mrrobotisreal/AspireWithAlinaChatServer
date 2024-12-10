@@ -378,6 +378,8 @@ func handleDeleteMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Println("Deleting all messages for chatID:", req.ChatID)
+
 	response, err := deleteMessages(req.ChatID)
 	if err != nil {
 		http.Error(w, "Error deleting all messages for chatID: "+req.ChatID, http.StatusInternalServerError)
@@ -392,8 +394,9 @@ func deleteMessages(chatID string) (DeleteAllChatMessagesResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	fmt.Println("Attempting to delete ALL messages for chatID:", chatID)
 	collection := mongoClient.Database(dbName).Collection(chatsCollection)
-	_, err := collection.DeleteMany(ctx, bson.M{"chatid": chatID})
+	_, err := collection.DeleteMany(ctx, bson.M{"chatID": chatID})
 	if err != nil {
 		fmt.Println("Error finding and deleting all chat messages for chatID:", chatID)
 		fmt.Println("Error message:", err)
@@ -401,6 +404,7 @@ func deleteMessages(chatID string) (DeleteAllChatMessagesResponse, error) {
 			IsDeleted: false,
 		}, err
 	}
+	fmt.Println("Successfully deleted all messages! Supposedly...")
 
 	return DeleteAllChatMessagesResponse{
 		IsDeleted: true,
